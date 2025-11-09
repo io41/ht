@@ -24,6 +24,20 @@ struct ResizeArgs {
     rows: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct MouseArgs {
+    event: String,
+    button: String,
+    row: usize,
+    col: usize,
+    #[serde(default)]
+    shift: bool,
+    #[serde(default)]
+    alt: bool,
+    #[serde(default)]
+    control: bool,
+}
+
 pub async fn start(
     command_tx: mpsc::Sender<Command>,
     clients_tx: mpsc::Sender<session::Client>,
@@ -104,6 +118,55 @@ fn build_command(value: serde_json::Value) -> Result<Command, String> {
             let args: SendKeysArgs = args_from_json_value(value)?;
             let seqs = args.keys.into_iter().map(parse_key).collect();
             Ok(Command::Input(seqs))
+        }
+
+        Some("mouse") => {
+            let args: MouseArgs = args_from_json_value(value)?;
+
+            let is_click = args.event == "click";
+
+            let event_type = match args.event.as_str() {
+                "press" | "click" => command::MouseEventType::Press,
+                "release" => command::MouseEventType::Release,
+                "drag" => command::MouseEventType::Drag,
+                e => return Err(format!("invalid mouse event type: {}", e)),
+            };
+
+            let button = match args.button.as_str() {
+                "left" => command::MouseButton::Left,
+                "middle" => command::MouseButton::Middle,
+                "right" => command::MouseButton::Right,
+                "wheel_up" => command::MouseButton::WheelUp,
+                "wheel_down" => command::MouseButton::WheelDown,
+                b => return Err(format!("invalid mouse button: {}", b)),
+            };
+
+            // Validate coordinates (1-indexed)
+            if args.row == 0 || args.col == 0 {
+                return Err(
+                    "mouse coordinates must be 1-indexed (row >= 1, col >= 1)".to_string()
+                );
+            }
+
+            let modifiers = command::MouseModifiers {
+                shift: args.shift,
+                alt: args.alt,
+                control: args.control,
+            };
+
+            let mouse_event = command::MouseEvent {
+                event_type,
+                button,
+                row: args.row,
+                col: args.col,
+                modifiers,
+            };
+
+            if is_click {
+                Ok(Command::MouseClick(mouse_event))
+            } else {
+                Ok(Command::Mouse(mouse_event))
+            }
         }
 
         Some("resize") => {
@@ -281,7 +344,7 @@ fn parse_key(key: String) -> InputSeq {
 #[cfg(test)]
 mod test {
     use super::{cursor_key, parse_line, standard_key, Command};
-    use crate::command::InputSeq;
+    use crate::command::{InputSeq, MouseButton, MouseEventType};
 
     #[test]
     fn parse_input() {
@@ -486,5 +549,141 @@ mod test {
     #[test]
     fn parse_invalid_json() {
         parse_line("{").expect_err("should fail");
+    }
+
+    #[test]
+    fn parse_mouse_click() {
+        let command = parse_line(
+            r#"{ "type": "mouse", "event": "click", "button": "left", "row": 10, "col": 25 }"#,
+        )
+        .unwrap();
+        assert!(matches!(command, Command::MouseClick(_)));
+    }
+
+    #[test]
+    fn parse_mouse_press() {
+        let command = parse_line(
+            r#"{ "type": "mouse", "event": "press", "button": "right", "row": 5, "col": 15 }"#,
+        )
+        .unwrap();
+
+        if let Command::Mouse(event) = command {
+            assert!(matches!(event.event_type, MouseEventType::Press));
+            assert!(matches!(event.button, MouseButton::Right));
+            assert_eq!(event.row, 5);
+            assert_eq!(event.col, 15);
+            assert!(!event.modifiers.shift);
+            assert!(!event.modifiers.alt);
+            assert!(!event.modifiers.control);
+        } else {
+            panic!("expected Command::Mouse");
+        }
+    }
+
+    #[test]
+    fn parse_mouse_release() {
+        let command = parse_line(
+            r#"{ "type": "mouse", "event": "release", "button": "middle", "row": 1, "col": 1 }"#,
+        )
+        .unwrap();
+
+        if let Command::Mouse(event) = command {
+            assert!(matches!(event.event_type, MouseEventType::Release));
+            assert!(matches!(event.button, MouseButton::Middle));
+        } else {
+            panic!("expected Command::Mouse");
+        }
+    }
+
+    #[test]
+    fn parse_mouse_drag() {
+        let command = parse_line(
+            r#"{ "type": "mouse", "event": "drag", "button": "left", "row": 20, "col": 30 }"#,
+        )
+        .unwrap();
+
+        if let Command::Mouse(event) = command {
+            assert!(matches!(event.event_type, MouseEventType::Drag));
+        } else {
+            panic!("expected Command::Mouse");
+        }
+    }
+
+    #[test]
+    fn parse_mouse_with_modifiers() {
+        let command = parse_line(
+            r#"{ "type": "mouse", "event": "click", "button": "left", "row": 10, "col": 25, "shift": true, "control": true }"#,
+        )
+        .unwrap();
+
+        if let Command::MouseClick(event) = command {
+            assert!(event.modifiers.shift);
+            assert!(event.modifiers.control);
+            assert!(!event.modifiers.alt);
+        } else {
+            panic!("expected Command::MouseClick");
+        }
+    }
+
+    #[test]
+    fn parse_mouse_wheel() {
+        let command = parse_line(
+            r#"{ "type": "mouse", "event": "press", "button": "wheel_up", "row": 10, "col": 25 }"#,
+        )
+        .unwrap();
+
+        if let Command::Mouse(event) = command {
+            assert!(matches!(event.button, MouseButton::WheelUp));
+        } else {
+            panic!("expected Command::Mouse");
+        }
+
+        let command = parse_line(
+            r#"{ "type": "mouse", "event": "press", "button": "wheel_down", "row": 10, "col": 25 }"#,
+        )
+        .unwrap();
+
+        if let Command::Mouse(event) = command {
+            assert!(matches!(event.button, MouseButton::WheelDown));
+        } else {
+            panic!("expected Command::Mouse");
+        }
+    }
+
+    #[test]
+    fn parse_mouse_invalid_event() {
+        parse_line(
+            r#"{ "type": "mouse", "event": "invalid", "button": "left", "row": 10, "col": 25 }"#,
+        )
+        .expect_err("should fail");
+    }
+
+    #[test]
+    fn parse_mouse_invalid_button() {
+        parse_line(
+            r#"{ "type": "mouse", "event": "click", "button": "invalid", "row": 10, "col": 25 }"#,
+        )
+        .expect_err("should fail");
+    }
+
+    #[test]
+    fn parse_mouse_zero_row() {
+        parse_line(
+            r#"{ "type": "mouse", "event": "click", "button": "left", "row": 0, "col": 25 }"#,
+        )
+        .expect_err("should fail");
+    }
+
+    #[test]
+    fn parse_mouse_zero_col() {
+        parse_line(
+            r#"{ "type": "mouse", "event": "click", "button": "left", "row": 10, "col": 0 }"#,
+        )
+        .expect_err("should fail");
+    }
+
+    #[test]
+    fn parse_mouse_missing_args() {
+        parse_line(r#"{ "type": "mouse" }"#).expect_err("should fail");
     }
 }

@@ -205,6 +205,50 @@ specifying new width (`cols`) and height (`rows`).
 
 This command triggers `resize` event.
 
+#### mouse
+
+`mouse` command allows sending mouse events to the application running in the
+virtual terminal.
+
+```json
+{ "type": "mouse", "event": "click", "button": "left", "row": 10, "col": 25 }
+{ "type": "mouse", "event": "press", "button": "right", "row": 5, "col": 15, "control": true }
+{ "type": "mouse", "event": "drag", "button": "left", "row": 12, "col": 30 }
+{ "type": "mouse", "event": "release", "button": "left", "row": 12, "col": 30 }
+```
+
+Event types:
+- `press` - mouse button pressed down
+- `release` - mouse button released
+- `drag` - mouse motion while button is held down
+- `click` - convenience shorthand that sends both press and release events
+
+Supported buttons:
+- `left`, `middle`, `right` - standard mouse buttons
+- `wheel_up`, `wheel_down` - scroll wheel events
+
+Coordinates are 1-indexed, meaning row 1, col 1 represents the top-left cell of
+the terminal. Coordinates exceeding the current terminal size will trigger a
+warning but are still sent to the application.
+
+Optional modifier keys can be specified as boolean fields (default `false`):
+- `shift` - Shift key held during mouse event
+- `alt` - Alt/Option key held during mouse event
+- `control` - Control key held during mouse event
+
+Example with modifiers:
+```json
+{ "type": "mouse", "event": "click", "button": "left", "row": 10, "col": 25, "shift": true, "control": true }
+```
+
+**Important**: Mouse events use the SGR extended mouse protocol (`\x1b[<` format).
+The application running in the terminal must enable mouse tracking for these
+events to have any effect. Most modern TUI applications (vim with `:set mouse=a`,
+tmux, less, emacs, etc.) support mouse tracking and will enable it automatically
+when needed.
+
+This command doesn't trigger any event.
+
 ### WebSocket API
 
 The WebSocket API currently provides 2 endpoints:

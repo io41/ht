@@ -66,6 +66,16 @@ async fn start_http_api(
     Ok(())
 }
 
+fn validate_mouse_coordinates(mouse_event: &command::MouseEvent, session: &Session) {
+    let (cols, rows) = session.size();
+    if mouse_event.row > rows || mouse_event.col > cols {
+        eprintln!(
+            "warning: mouse coordinates ({},{}) exceed terminal size ({}x{})",
+            mouse_event.col, mouse_event.row, cols, rows
+        );
+    }
+}
+
 async fn run_event_loop(
     mut output_rx: mpsc::Receiver<Vec<u8>>,
     input_tx: mpsc::Sender<Vec<u8>>,
@@ -96,6 +106,28 @@ async fn run_event_loop(
                     Some(Command::Input(seqs)) => {
                         let data = command::seqs_to_bytes(&seqs, session.cursor_key_app_mode());
                         input_tx.send(data).await?;
+                    }
+
+                    Some(Command::Mouse(mouse_event)) => {
+                        validate_mouse_coordinates(&mouse_event, &session);
+                        let data = command::mouse_to_bytes(&mouse_event);
+                        input_tx.send(data).await?;
+                    }
+
+                    Some(Command::MouseClick(mouse_event)) => {
+                        validate_mouse_coordinates(&mouse_event, &session);
+
+                        // Send press event
+                        let mut press_event = mouse_event.clone();
+                        press_event.event_type = command::MouseEventType::Press;
+                        let press_data = command::mouse_to_bytes(&press_event);
+                        input_tx.send(press_data).await?;
+
+                        // Send release event
+                        let mut release_event = mouse_event;
+                        release_event.event_type = command::MouseEventType::Release;
+                        let release_data = command::mouse_to_bytes(&release_event);
+                        input_tx.send(release_data).await?;
                     }
 
                     Some(Command::Snapshot) => {
