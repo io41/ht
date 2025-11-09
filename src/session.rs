@@ -76,6 +76,10 @@ impl Session {
         self.vt.cursor_key_app_mode()
     }
 
+    pub fn size(&self) -> (usize, usize) {
+        self.vt.size()
+    }
+
     pub fn subscribe(&self) -> Subscription {
         let (cols, rows) = self.vt.size();
 
