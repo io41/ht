@@ -21,6 +21,7 @@ pub enum Event {
     Output(f64, String),
     Resize(f64, usize, usize),
     Snapshot(usize, usize, String, String),
+    Exit(f64, i32, Option<i32>),
 }
 
 pub struct Client(oneshot::Sender<Subscription>);
@@ -70,6 +71,11 @@ impl Session {
             self.vt.dump(),
             self.text_view(),
         ));
+    }
+
+    pub fn exit(&self, exit_code: i32, signal: Option<i32>) {
+        let time = self.start_time.elapsed().as_secs_f64();
+        let _ = self.broadcast_tx.send(Event::Exit(time, exit_code, signal));
     }
 
     pub fn cursor_key_app_mode(&self) -> bool {
@@ -147,6 +153,14 @@ impl Event {
                     "rows": rows,
                     "seq": seq,
                     "text": text,
+                })
+            }),
+
+            Event::Exit(_time, code, signal) => json!({
+                "type": "exit",
+                "data": json!({
+                    "code": code,
+                    "signal": signal,
                 })
             }),
         }

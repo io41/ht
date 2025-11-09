@@ -25,8 +25,7 @@ async fn main() -> Result<()> {
     let api = start_stdio_api(command_tx, clients_tx, cli.subscribe.unwrap_or_default());
     let (pid, pty) = start_pty(cli.command, &cli.size, input_rx, output_tx)?;
     let session = build_session(&cli.size, pid);
-    run_event_loop(output_rx, input_tx, command_rx, clients_rx, session, api).await?;
-    pty.await?
+    run_event_loop(output_rx, input_tx, command_rx, clients_rx, session, api, pty).await
 }
 
 fn build_session(size: &cli::Size, pid: i32) -> Session {
@@ -46,7 +45,7 @@ fn start_pty(
     size: &cli::Size,
     input_rx: mpsc::Receiver<Vec<u8>>,
     output_tx: mpsc::Sender<Vec<u8>>,
-) -> Result<(i32, JoinHandle<Result<()>>)> {
+) -> Result<(i32, JoinHandle<Result<pty::ExitStatus>>)> {
     let command = command.join(" ");
     eprintln!("launching \"{}\" in terminal of size {}", command, size);
     let (pid, fut) = pty::spawn(command, size, input_rx, output_tx)?;
@@ -83,25 +82,47 @@ async fn run_event_loop(
     mut clients_rx: mpsc::Receiver<session::Client>,
     mut session: Session,
     mut api_handle: JoinHandle<Result<()>>,
+    mut pty_handle: JoinHandle<Result<pty::ExitStatus>>,
 ) -> Result<()> {
     let mut serving = true;
+    let mut stdin_open = true;
+    let mut api_running = true;
+    let mut output_open = true;
 
     loop {
         tokio::select! {
-            result = output_rx.recv() => {
+            result = &mut pty_handle => {
+                match result {
+                    Ok(Ok(exit_status)) => {
+                        eprintln!("process exited with code {}, shutting down...", exit_status.code);
+                        session.exit(exit_status.code, exit_status.signal);
+                    },
+                    Ok(Err(e)) => {
+                        eprintln!("pty error: {e}, shutting down...");
+                        session.exit(1, None);
+                    },
+                    Err(e) => {
+                        eprintln!("pty task error: {e}, shutting down...");
+                        session.exit(1, None);
+                    }
+                }
+                break;
+            }
+
+            result = output_rx.recv(), if output_open => {
                 match result {
                     Some(data) => {
                         session.output(String::from_utf8_lossy(&data).to_string());
                     },
 
                     None => {
-                        eprintln!("process exited, shutting down...");
-                        break;
+                        eprintln!("output channel closed, waiting for process to exit...");
+                        output_open = false;
                     }
                 }
             }
 
-            command = command_rx.recv() => {
+            command = command_rx.recv(), if stdin_open => {
                 match command {
                     Some(Command::Input(seqs)) => {
                         let data = command::seqs_to_bytes(&seqs, session.cursor_key_app_mode());
@@ -139,8 +160,8 @@ async fn run_event_loop(
                     }
 
                     None => {
-                        eprintln!("stdin closed, shutting down...");
-                        break;
+                        eprintln!("stdin closed, continuing to wait for process to exit...");
+                        stdin_open = false;
                     }
                 }
             }
@@ -157,9 +178,9 @@ async fn run_event_loop(
                 }
             }
 
-            _ = &mut api_handle => {
-                eprintln!("stdin closed, shutting down...");
-                break;
+            _ = &mut api_handle, if api_running => {
+                eprintln!("api task exited, continuing to wait for process to exit...");
+                api_running = false;
             }
         }
     }

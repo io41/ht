@@ -46,10 +46,11 @@ pub async fn start(
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     thread::spawn(|| read_stdin(input_tx));
     let mut events = session::stream(&clients_tx).await?;
+    let mut stdin_open = true;
 
     loop {
         tokio::select! {
-            line = input_rx.recv() => {
+            line = input_rx.recv(), if stdin_open => {
                 match line {
                     Some(line) => {
                         match parse_line(&line) {
@@ -58,7 +59,7 @@ pub async fn start(
                         }
                     }
 
-                    None => break
+                    None => stdin_open = false,
                 }
             }
 
@@ -79,6 +80,10 @@ pub async fn start(
                     }
 
                     Some(Ok(e @ Snapshot(_, _, _, _))) if sub.snapshot => {
+                        println!("{}", e.to_json());
+                    }
+
+                    Some(Ok(e @ Exit(_, _, _))) if sub.exit => {
                         println!("{}", e.to_json());
                     }
 
@@ -103,25 +108,27 @@ fn read_stdin(input_tx: mpsc::UnboundedSender<String>) -> Result<()> {
 
 fn parse_line(line: &str) -> Result<command::Command, String> {
     serde_json::from_str::<serde_json::Value>(line)
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("invalid JSON: {}\n  tip: each command must be valid JSON on a single line", e))
         .and_then(build_command)
 }
 
 fn build_command(value: serde_json::Value) -> Result<Command, String> {
-    match value["type"].as_str() {
+    let cmd_type = value["type"].as_str();
+
+    match cmd_type {
         Some("input") => {
-            let args: InputArgs = args_from_json_value(value)?;
+            let args: InputArgs = args_from_json_value(&value, "input")?;
             Ok(Command::Input(vec![standard_key(args.payload)]))
         }
 
         Some("sendKeys") => {
-            let args: SendKeysArgs = args_from_json_value(value)?;
+            let args: SendKeysArgs = args_from_json_value(&value, "sendKeys")?;
             let seqs = args.keys.into_iter().map(parse_key).collect();
             Ok(Command::Input(seqs))
         }
 
         Some("mouse") => {
-            let args: MouseArgs = args_from_json_value(value)?;
+            let args: MouseArgs = args_from_json_value(&value, "mouse")?;
 
             let is_click = args.event == "click";
 
@@ -170,21 +177,40 @@ fn build_command(value: serde_json::Value) -> Result<Command, String> {
         }
 
         Some("resize") => {
-            let args: ResizeArgs = args_from_json_value(value)?;
+            let args: ResizeArgs = args_from_json_value(&value, "resize")?;
             Ok(Command::Resize(args.cols, args.rows))
         }
 
         Some("takeSnapshot") => Ok(Command::Snapshot),
 
-        other => Err(format!("invalid command type: {other:?}")),
+        None => Err(format!(
+            "missing 'type' field in command\n  \
+             tip: commands must have a 'type' field, e.g., {{\"type\": \"input\", \"payload\": \"text\"}}\n  \
+             see: https://github.com/andyk/ht#api"
+        )),
+
+        other => Err(format!(
+            "invalid command type: {other:?}\n  \
+             tip: valid types are: input, sendKeys, mouse, resize, takeSnapshot\n  \
+             see: https://github.com/andyk/ht#api"
+        )),
     }
 }
 
-fn args_from_json_value<T>(value: serde_json::Value) -> Result<T, String>
+fn args_from_json_value<T>(value: &serde_json::Value, cmd_type: &str) -> Result<T, String>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    serde_json::from_value(value.clone()).map_err(|e| {
+        format!(
+            "invalid arguments for '{}' command: {}\n  \
+             tip: check the documentation for the correct format\n  \
+             see: https://github.com/andyk/ht#{}",
+            cmd_type,
+            e,
+            cmd_type.to_lowercase()
+        )
+    })
 }
 
 fn standard_key<S: ToString>(seq: S) -> InputSeq {

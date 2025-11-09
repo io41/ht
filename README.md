@@ -294,6 +294,20 @@ In addition to the fields from `snapshot` event this one includes:
 
 - `pid` - PID of the top-level process started by ht (e.g. PID of bash)
 
+Example:
+```json
+{
+  "type": "init",
+  "data": {
+    "cols": 120,
+    "rows": 40,
+    "pid": 12345,
+    "seq": "\u001b[0m\u001b[?25h...",
+    "text": "bash-5.1$ _\n\n..."
+  }
+}
+```
+
 #### `output`
 
 Terminal output. Sent when an application (e.g. shell) running under ht prints
@@ -303,14 +317,35 @@ Event data is an object with the following fields:
 
 - `seq` - a raw sequence of characters written to a terminal, potentially including control sequences (colors, cursor positioning, etc.)
 
+Example:
+```json
+{
+  "type": "output",
+  "data": {
+    "seq": "hello world\r\n"
+  }
+}
+```
+
 #### `resize`
 
-Terminal resize. Send when the terminal is resized with the `resize` command.
+Terminal resize. Sent when the terminal is resized with the `resize` command.
 
 Event data is an object with the following fields:
 
 - `cols` - current terminal width, number of columns
 - `rows` - current terminal height, number of rows
+
+Example:
+```json
+{
+  "type": "resize",
+  "data": {
+    "cols": 80,
+    "rows": 24
+  }
+}
+```
 
 #### `snapshot`
 
@@ -323,6 +358,82 @@ Event data is an object with the following fields:
 - `rows` - current terminal height, number of rows
 - `text` - plain text snapshot as multi-line string, where each line represents a terminal row
 - `seq` - a raw sequence of characters, which when printed to a blank terminal puts it in the same state as [ht's virtual terminal](https://github.com/asciinema/avt)
+
+Example:
+```json
+{
+  "type": "snapshot",
+  "data": {
+    "cols": 120,
+    "rows": 40,
+    "seq": "\u001b[0m\u001b[?25h...",
+    "text": "bash-5.1$ ls\nfile1.txt  file2.txt\n..."
+  }
+}
+```
+
+#### `exit`
+
+Process exit. Sent when the process running in the terminal exits.
+
+Event data is an object with the following fields:
+
+- `code` - exit code of the process (0-255 for normal exits, 128+N for signal terminations where N is the signal number)
+- `signal` - signal number that terminated the process, or `null` if the process exited normally
+
+**Important notes about signal handling:**
+
+The `signal` field is only populated when the **direct PTY child process** (the process started by ht) receives a signal. If a subprocess is killed by a signal but the parent shell exits normally, the `signal` field will be `null` even though the exit code may be 128+N.
+
+For example:
+- If you send SIGTERM directly to the bash process started by ht, you'll see: `{"code": 143, "signal": 15}`
+- If bash runs a subprocess that gets killed by SIGTERM and bash exits with code 143, you'll see: `{"code": 143, "signal": null}`
+
+This is correct behavior because the shell itself wasn't signaled—it exited normally after its child was signaled.
+
+Common signal-based exit codes:
+- 130 (128+2): Process terminated by SIGINT (Ctrl-C)
+- 137 (128+9): Process terminated by SIGKILL
+- 143 (128+15): Process terminated by SIGTERM
+
+Examples:
+```json
+// Normal exit with code 0
+{
+  "type": "exit",
+  "data": {
+    "code": 0,
+    "signal": null
+  }
+}
+
+// Normal exit with non-zero code
+{
+  "type": "exit",
+  "data": {
+    "code": 42,
+    "signal": null
+  }
+}
+
+// Process killed by SIGTERM (signal 15)
+{
+  "type": "exit",
+  "data": {
+    "code": 143,
+    "signal": 15
+  }
+}
+
+// Process killed by SIGKILL (signal 9)
+{
+  "type": "exit",
+  "data": {
+    "code": 137,
+    "signal": 9
+  }
+}
+```
 
 ## Testing on command line
 
