@@ -25,8 +25,7 @@ async fn main() -> Result<()> {
     let api = start_stdio_api(command_tx, clients_tx, cli.subscribe.unwrap_or_default());
     let (pid, pty) = start_pty(cli.command, &cli.size, input_rx, output_tx)?;
     let session = build_session(&cli.size, pid);
-    run_event_loop(output_rx, input_tx, command_rx, clients_rx, session, api).await?;
-    pty.await?
+    run_event_loop(output_rx, input_tx, command_rx, clients_rx, session, api, pty).await
 }
 
 fn build_session(size: &cli::Size, pid: i32) -> Session {
@@ -46,7 +45,7 @@ fn start_pty(
     size: &cli::Size,
     input_rx: mpsc::Receiver<Vec<u8>>,
     output_tx: mpsc::Sender<Vec<u8>>,
-) -> Result<(i32, JoinHandle<Result<()>>)> {
+) -> Result<(i32, JoinHandle<Result<pty::ExitStatus>>)> {
     let command = command.join(" ");
     eprintln!("launching \"{}\" in terminal of size {}", command, size);
     let (pid, fut) = pty::spawn(command, size, input_rx, output_tx)?;
@@ -66,6 +65,16 @@ async fn start_http_api(
     Ok(())
 }
 
+fn validate_mouse_coordinates(mouse_event: &command::MouseEvent, session: &Session) {
+    let (cols, rows) = session.size();
+    if mouse_event.row > rows || mouse_event.col > cols {
+        eprintln!(
+            "warning: mouse coordinates ({},{}) exceed terminal size ({}x{})",
+            mouse_event.col, mouse_event.row, cols, rows
+        );
+    }
+}
+
 async fn run_event_loop(
     mut output_rx: mpsc::Receiver<Vec<u8>>,
     input_tx: mpsc::Sender<Vec<u8>>,
@@ -73,29 +82,73 @@ async fn run_event_loop(
     mut clients_rx: mpsc::Receiver<session::Client>,
     mut session: Session,
     mut api_handle: JoinHandle<Result<()>>,
+    mut pty_handle: JoinHandle<Result<pty::ExitStatus>>,
 ) -> Result<()> {
     let mut serving = true;
+    let mut stdin_open = true;
+    let mut api_running = true;
+    let mut output_open = true;
 
     loop {
         tokio::select! {
-            result = output_rx.recv() => {
+            result = &mut pty_handle => {
+                match result {
+                    Ok(Ok(exit_status)) => {
+                        eprintln!("process exited with code {}, shutting down...", exit_status.code);
+                        session.exit(exit_status.code, exit_status.signal);
+                    },
+                    Ok(Err(e)) => {
+                        eprintln!("pty error: {e}, shutting down...");
+                        session.exit(1, None);
+                    },
+                    Err(e) => {
+                        eprintln!("pty task error: {e}, shutting down...");
+                        session.exit(1, None);
+                    }
+                }
+                break;
+            }
+
+            result = output_rx.recv(), if output_open => {
                 match result {
                     Some(data) => {
                         session.output(String::from_utf8_lossy(&data).to_string());
                     },
 
                     None => {
-                        eprintln!("process exited, shutting down...");
-                        break;
+                        eprintln!("output channel closed, waiting for process to exit...");
+                        output_open = false;
                     }
                 }
             }
 
-            command = command_rx.recv() => {
+            command = command_rx.recv(), if stdin_open => {
                 match command {
                     Some(Command::Input(seqs)) => {
                         let data = command::seqs_to_bytes(&seqs, session.cursor_key_app_mode());
                         input_tx.send(data).await?;
+                    }
+
+                    Some(Command::Mouse(mouse_event)) => {
+                        validate_mouse_coordinates(&mouse_event, &session);
+                        let data = command::mouse_to_bytes(&mouse_event);
+                        input_tx.send(data).await?;
+                    }
+
+                    Some(Command::MouseClick(mouse_event)) => {
+                        validate_mouse_coordinates(&mouse_event, &session);
+
+                        // Send press event
+                        let mut press_event = mouse_event.clone();
+                        press_event.event_type = command::MouseEventType::Press;
+                        let press_data = command::mouse_to_bytes(&press_event);
+                        input_tx.send(press_data).await?;
+
+                        // Send release event
+                        let mut release_event = mouse_event;
+                        release_event.event_type = command::MouseEventType::Release;
+                        let release_data = command::mouse_to_bytes(&release_event);
+                        input_tx.send(release_data).await?;
                     }
 
                     Some(Command::Snapshot) => {
@@ -107,8 +160,8 @@ async fn run_event_loop(
                     }
 
                     None => {
-                        eprintln!("stdin closed, shutting down...");
-                        break;
+                        eprintln!("stdin closed, continuing to wait for process to exit...");
+                        stdin_open = false;
                     }
                 }
             }
@@ -125,9 +178,9 @@ async fn run_event_loop(
                 }
             }
 
-            _ = &mut api_handle => {
-                eprintln!("stdin closed, shutting down...");
-                break;
+            _ = &mut api_handle, if api_running => {
+                eprintln!("api task exited, continuing to wait for process to exit...");
+                api_running = false;
             }
         }
     }

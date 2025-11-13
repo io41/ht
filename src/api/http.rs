@@ -103,6 +103,8 @@ async fn alis_message(
 
         Ok(Snapshot(_, _, _, _)) => None,
 
+        Ok(Exit(_, _, _)) => None,
+
         Err(e) => Some(Err(axum::Error::new(e))),
     }
 }
